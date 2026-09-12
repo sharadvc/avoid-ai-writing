@@ -44,17 +44,67 @@ const AIDetector = (() => {
   };
   const GREEK_LOOKALIKES = { 'ο': 'o', 'Ο': 'O', 'α': 'a', 'Α': 'A', 'ρ': 'p', 'Ρ': 'P' };
 
-  function normalizeText(text) {
+  // ─── Source-coordinate mapping (issue #189) ─────────────────────────
+  //
+  // Each entry maps one code unit in the working string to the matching
+  // code unit in the caller's source. Deletion passes copy the entries for
+  // retained characters once, so interleaved or overlapping removals cannot
+  // double-count offsets. Masking and homoglyph replacement keep their input
+  // length and therefore keep the current map unchanged.
+  function identitySourceMap(length) {
+    return Array.from({ length }, (_, index) => index);
+  }
+
+  function appendMapRange(target, source, start, end) {
+    for (let index = start; index < end; index += 1) target.push(source[index]);
+  }
+
+  function remapFindingsToSource(issues, regions, sourceMap) {
+    for (const issue of issues) {
+      if (Number.isInteger(issue.index)) issue.index = sourceMap[issue.index];
+    }
+    for (const region of regions) {
+      region.start = sourceMap[region.start];
+      region.end = sourceMap[region.end - 1] + 1;
+    }
+  }
+
+  const ZERO_WIDTH_RE = /[​-‍﻿⁠]/u;
+  const ZERO_WIDTH_GLOBAL_RE = /[​-‍﻿⁠]/gu;
+  const HOMOGLYPH_GLOBAL_RE = /[Ѐ-ӿͰ-Ͽ]/gu;
+  const ROLEPLAY_VERBS_RE = /^(?:nods|sighs|laughs|smiles|frowns|shrugs|grins|winks|chuckles|gasps|pauses|thinks|wonders|whispers|shouts|gestures|raises|leans|turns|looks|glances|smirks|blinks|nodding|sighing|laughing|smiling|thinking|gesturing)\b/i;
+  const ROLEPLAY_MARKER_RE = /(?<!\*)\*([^*\n]{1,80}?)\*(?!\*)/gu;
+
+  function normalizeText(text, sourceMap) {
     const flags = { zeroWidth: 0, homoglyph: 0, roleplay: 0 };
     let out = text;
+    let map = Array.isArray(sourceMap) ? sourceMap : null;
 
     // 1. Strip zero-width chars (ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D,
     //    BOM U+FEFF, word joiner U+2060).
-    out = out.replace(/[​-‍﻿⁠]/g, () => { flags.zeroWidth++; return ''; });
+    if (map) {
+      const chars = [];
+      const nextMap = [];
+      for (let i = 0; i < out.length; i += 1) {
+        if (ZERO_WIDTH_RE.test(out[i])) {
+          flags.zeroWidth += 1;
+          continue;
+        }
+        chars.push(out[i]);
+        nextMap.push(map[i]);
+      }
+      out = chars.join('');
+      map = nextMap;
+    } else {
+      out = out.replace(ZERO_WIDTH_GLOBAL_RE, () => {
+        flags.zeroWidth += 1;
+        return '';
+      });
+    }
 
     // 2. Swap Cyrillic / Greek Latin-lookalike chars back to Latin so
     //    pattern matching catches obfuscated tokens.
-    out = out.replace(/[Ѐ-ӿͰ-Ͽ]/g, (m) => {
+    out = out.replace(HOMOGLYPH_GLOBAL_RE, (m) => {
       const swap = CYRILLIC_LOOKALIKES[m] ?? GREEK_LOOKALIKES[m];
       if (swap) { flags.homoglyph++; return swap; }
       return m;
@@ -66,13 +116,34 @@ const AIDetector = (() => {
     //    artifact shape. Markdown `**bold**` is rejected by the
     //    lookbehind/lookahead; legitimate multi-word `*italic*` is
     //    preserved because the verb whitelist is narrow.
-    const ROLEPLAY_VERBS = /^(?:nods|sighs|laughs|smiles|frowns|shrugs|grins|winks|chuckles|gasps|pauses|thinks|wonders|whispers|shouts|gestures|raises|leans|turns|looks|glances|smirks|blinks|nodding|sighing|laughing|smiling|thinking|gesturing)\b/i;
-    out = out.replace(/(?<!\*)\*([^*\n]{1,80}?)\*(?!\*)/gu, (m, inner) => {
-      if (ROLEPLAY_VERBS.test(inner)) { flags.roleplay++; return ''; }
-      return m;
-    });
+    if (map) {
+      const chars = [];
+      const nextMap = [];
+      const matcher = new RegExp(ROLEPLAY_MARKER_RE.source, ROLEPLAY_MARKER_RE.flags);
+      let cursor = 0;
+      let match;
+      while ((match = matcher.exec(out)) !== null) {
+        if (!ROLEPLAY_VERBS_RE.test(match[1])) continue;
+        chars.push(out.slice(cursor, match.index));
+        appendMapRange(nextMap, map, cursor, match.index);
+        flags.roleplay += 1;
+        cursor = match.index + match[0].length;
+      }
+      chars.push(out.slice(cursor));
+      appendMapRange(nextMap, map, cursor, map.length);
+      out = chars.join('');
+      map = nextMap;
+    } else {
+      out = out.replace(ROLEPLAY_MARKER_RE, (m, inner) => {
+        if (ROLEPLAY_VERBS_RE.test(inner)) {
+          flags.roleplay += 1;
+          return '';
+        }
+        return m;
+      });
+    }
 
-    return { text: out, flags };
+    return map ? { text: out, flags, sourceMap: map } : { text: out, flags };
   }
 
   // ─── Tier 1: Always flag ───────────────────────────────────────────
@@ -925,6 +996,136 @@ const AIDetector = (() => {
     return { start: 0, end: lines[closingLine].end };
   }
 
+  // Mask HTML comments in source order while tracking the Markdown constructs
+  // that protect a literal `<!--`. A comment wins over code delimiters that
+  // occur inside it; a fence, code span, or top-level indented block that
+  // starts first wins over comment-looking text inside that code. Each source
+  // character participates in a bounded number of forward scans.
+  function maskHtmlCommentsOutsideCode(chars) {
+    const source = chars.join('');
+    const lines = source.split('\n');
+    let offset = 0;
+    let openFence = null;
+    let inIndentedBlock = false;
+    let previousBlank = true;
+    let listContext = false;
+    let maskedHtmlComments = 0;
+    const commentClosings = [];
+    let closingCursor = 0;
+
+    for (let i = 0; i <= source.length - 3; i += 1) {
+      if (source[i] === '-' && source[i + 1] === '-' && source[i + 2] === '>') {
+        commentClosings.push(i);
+      }
+    }
+
+    const backtickRuns = (line) => {
+      const runs = [];
+      for (let i = 0; i < line.length;) {
+        if (line[i] !== '`') {
+          i += 1;
+          continue;
+        }
+        const start = i;
+        while (i < line.length && line[i] === '`') i += 1;
+        runs.push({ start, end: i, length: i - start, next: -1 });
+      }
+      const nextByLength = new Map();
+      for (let i = runs.length - 1; i >= 0; i -= 1) {
+        runs[i].next = nextByLength.get(runs[i].length) ?? -1;
+        nextByLength.set(runs[i].length, i);
+      }
+      return runs;
+    };
+
+    for (const originalLine of lines) {
+      const lineEnd = offset + originalLine.length;
+      let visibleLine = chars.slice(offset, lineEnd).join('');
+      const fenceMatch = /^[ \t]{0,3}(`{3,}|~{3,})([^\n]*)$/.exec(visibleLine);
+      let fencedLine = false;
+
+      if (openFence) {
+        fencedLine = true;
+        if (
+          fenceMatch
+          && fenceMatch[1][0] === openFence.char
+          && fenceMatch[1].length >= openFence.length
+          && /^[ \t]*\r?$/.test(fenceMatch[2])
+        ) openFence = null;
+      } else if (fenceMatch) {
+        fencedLine = true;
+        openFence = { char: fenceMatch[1][0], length: fenceMatch[1].length };
+      }
+
+      const indented = /^(?: {4}|\t)\S/.test(visibleLine);
+      const indentedCode = !fencedLine
+        && indented
+        && (inIndentedBlock || (previousBlank && !listContext));
+
+      if (!fencedLine && !indentedCode) {
+        const runs = backtickRuns(visibleLine);
+        let runIndex = 0;
+        let cursor = 0;
+
+        while (cursor < visibleLine.length) {
+          while (runIndex < runs.length && runs[runIndex].start < cursor) runIndex += 1;
+          const commentIndex = visibleLine.indexOf('<!--', cursor);
+          const run = runs[runIndex];
+
+          if (run && (commentIndex === -1 || run.start < commentIndex)) {
+            if (run.next !== -1) {
+              cursor = runs[run.next].end;
+              runIndex = run.next + 1;
+            } else {
+              cursor = run.end;
+              runIndex += 1;
+            }
+            continue;
+          }
+          if (commentIndex === -1) break;
+
+          const openingIndex = offset + commentIndex;
+          while (
+            closingCursor < commentClosings.length
+            && commentClosings[closingCursor] < openingIndex + 2
+          ) closingCursor += 1;
+          const closingIndex = commentClosings[closingCursor] ?? -1;
+          const end = closingIndex === -1 ? source.length : closingIndex + 3;
+          if (closingIndex !== -1) closingCursor += 1;
+          blankRange(chars, openingIndex, end);
+          maskedHtmlComments += 1;
+          cursor = Math.min(visibleLine.length, end - offset);
+        }
+      }
+
+      visibleLine = chars.slice(offset, lineEnd).join('');
+      const layoutChars = visibleLine.split('');
+      if (fencedLine) {
+        blankRange(layoutChars, 0, layoutChars.length);
+      } else {
+        const inlineRe = /(`+)(?:(?!\1)[^\n])+\1/g;
+        let inlineMatch;
+        while ((inlineMatch = inlineRe.exec(visibleLine)) !== null) {
+          blankRange(layoutChars, inlineMatch.index, inlineMatch.index + inlineMatch[0].length);
+        }
+      }
+      const layoutLine = layoutChars.join('');
+      const blank = layoutLine.trim() === '';
+
+      if (indentedCode) inIndentedBlock = true;
+      else if (!blank) inIndentedBlock = false;
+
+      if (!blank && !indentedCode && !fencedLine) {
+        if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/.test(layoutLine)) listContext = true;
+        else if (/^\S/.test(layoutLine)) listContext = false;
+      }
+      previousBlank = blank;
+      offset = lineEnd + 1;
+    }
+
+    return maskedHtmlComments;
+  }
+
   // Mask source-only Markdown spans while preserving source offsets. The
   // detector can then score what a reader sees without making later issue
   // indexes or sentence highlights point at the wrong source location.
@@ -938,22 +1139,7 @@ const AIDetector = (() => {
       maskedFrontmatter = 1;
     }
 
-    const maskCommentCode = () => {
-      const codeChars = maskCode(chars.join('')).split('');
-      maskTopLevelIndentedCode(codeChars, { listAware: true });
-      return codeChars.join('');
-    };
-    let maskedHtmlComments = 0;
-    let searchIndex = 0;
-    while (searchIndex < text.length) {
-      const openingIndex = maskCommentCode().indexOf('<!--', searchIndex);
-      if (openingIndex === -1) break;
-      const closingIndex = text.indexOf('-->', openingIndex + 2);
-      const end = closingIndex === -1 ? text.length : closingIndex + 3;
-      blankRange(chars, openingIndex, end);
-      maskedHtmlComments += 1;
-      searchIndex = end;
-    }
+    const maskedHtmlComments = maskHtmlCommentsOutsideCode(chars);
 
     return { text: chars.join(''), maskedFrontmatter, maskedHtmlComments };
   }
@@ -983,17 +1169,45 @@ const AIDetector = (() => {
   // Keep the historical deletion behavior for default plain mode. Paragraph-
   // scoped rules depend on the surrounding lines being rejoined exactly this
   // way, so changing this prepass would change scores for existing callers.
-  function stripMultilineBlockquotes(text) {
+  function stripMultilineBlockquotes(text, sourceMap) {
     const rawLines = text.split(/\r?\n/);
     const isQuote = rawLines.map((line) => /^\s*>\s/.test(line));
     const stripIndexes = new Set();
     for (let i = 0; i < rawLines.length; i += 1) {
       if (isQuote[i] && ((isQuote[i - 1] && i > 0) || isQuote[i + 1])) stripIndexes.add(i);
     }
-    return {
-      text: rawLines.filter((_, i) => !stripIndexes.has(i)).join('\n'),
+    const kept = rawLines
+      .map((_, index) => index)
+      .filter((index) => !stripIndexes.has(index));
+    const result = {
+      text: kept.map((index) => rawLines[index]).join('\n'),
       quotedLines: stripIndexes.size,
     };
+    if (!Array.isArray(sourceMap)) return result;
+
+    const lineStarts = [];
+    let offset = 0;
+    for (let i = 0; i < rawLines.length; i += 1) {
+      lineStarts.push(offset);
+      offset += rawLines[i].length;
+      if (i < rawLines.length - 1) {
+        if (text[offset] === '\r') offset += 1;
+        if (text[offset] === '\n') offset += 1;
+      }
+    }
+
+    const mapped = [];
+    for (let i = 0; i < kept.length; i += 1) {
+      const lineIndex = kept[i];
+      const start = lineStarts[lineIndex];
+      appendMapRange(mapped, sourceMap, start, start + rawLines[lineIndex].length);
+      if (i < kept.length - 1) {
+        const separatorStart = start + rawLines[lineIndex].length;
+        const newlineIndex = text[separatorStart] === '\r' ? separatorStart + 1 : separatorStart;
+        mapped.push(sourceMap[newlineIndex]);
+      }
+    }
+    return { ...result, sourceMap: mapped };
   }
 
   function maskTopLevelIndentedCode(chars, { listAware = false } = {}) {
@@ -1388,6 +1602,11 @@ const AIDetector = (() => {
       return { ...buildV2Defaults('UNSCORED', 'low'), score: 0, label: 'Empty', issues: [], stats: {}, tooShort: true };
     }
 
+    // Map each working-string code unit back to the caller's source. Every
+    // length-changing preprocessing stage composes this map as it removes
+    // characters, and results are translated before they leave the function.
+    let sourceMap = identitySourceMap(text.length);
+
     // Context mode selects context-appropriate flagging. Accepted values:
     //   'general' (default) — full ruleset
     //   'technical' — skip title-case headers; individual prose-only rules
@@ -1429,15 +1648,17 @@ const AIDetector = (() => {
     // keeps later issue and highlight offsets aligned with the source file.
     const blockquotes = sourceMode === 'rendered-markdown'
       ? maskMultilineBlockquotes(text)
-      : stripMultilineBlockquotes(text);
+      : stripMultilineBlockquotes(text, sourceMap);
     text = blockquotes.text;
+    if (blockquotes.sourceMap) sourceMap = blockquotes.sourceMap;
     const { quotedLines } = blockquotes;
 
     // Pre-pass: strip bypass-trick chars before pattern matching so
-    // "delve" with a Cyrillic 'е' still hits Tier 1. Original text is
-    // preserved so reported `match.index` values remain visually accurate.
-    const norm = normalizeText(text);
+    // "delve" with a Cyrillic 'е' still hits Tier 1. Compose the map while
+    // deleting characters so later offsets still address the source.
+    const norm = normalizeText(text, sourceMap);
     text = norm.text;
+    sourceMap = norm.sourceMap;
 
     const wordCount = countWords(text);
     if (wordCount < 10) {
@@ -2146,6 +2367,11 @@ const AIDetector = (() => {
       wordCount,
       denseAIVocab,
     });
+
+    // Translate both dense issue indexes and half-open highlight boundaries.
+    // Mapping the region end from its final retained code unit avoids pulling
+    // a later removed roleplay marker into the highlighted source slice.
+    remapFindingsToSource(deduped, regions, sourceMap);
 
     return {
       // Legacy fields preserved for existing callers.

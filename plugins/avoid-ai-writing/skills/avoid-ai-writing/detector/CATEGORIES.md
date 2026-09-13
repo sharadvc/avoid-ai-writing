@@ -141,4 +141,6 @@ mistake their absence for a coverage gap:
 > (`general`, `technical`, `marketing`, `personal`). Only `technical` currently
 > changes flagging (e.g. suppresses context-inappropriate flags); `marketing` and
 > `personal` are accepted and reported in stats but score like `general`. Full
-> profile-based tolerance remains an LLM-side judgment.
+> profile-based tolerance remains an LLM-side judgment. Map each skill profile to
+> a detector mode in **Skill profiles and detector `contextMode`** in
+> [`../references/patterns.md`](../references/patterns.md#skill-profiles-and-detector-contextmode).

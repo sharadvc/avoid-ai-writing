@@ -608,6 +608,21 @@ Pass an optional context hint to adjust rule strictness. If no context is specif
 **`docs`** — Documentation, READMEs, guides. Clarity over voice.
 **`casual`** — Slack messages, internal notes, quick replies. Only catch the worst offenders.
 
+### Skill profiles and detector `contextMode`
+
+The skill's `--context` values above tune strictness through the tolerance matrix (LLM rewrite/detect). The deterministic detector (CLI, CI gate, and `analyzeText()` API) uses a separate `options.contextMode` enum: `general`, `technical`, `marketing`, and `personal`. When you score text outside the skill, pass the **Detector mode** below so engine behavior matches the profile as closely as it can today. Per-rule relaxations and skips in the matrix are **not** replayed in the detector except where a mode changes flagging (today, mainly `technical`).
+
+| Skill profile (`--context`) | Detector `contextMode` | What differs |
+|-----------------------------|------------------------|--------------|
+| `linkedin` | `marketing` | Skill: short-form social tolerances (fragments, bold hooks, hashtag rules). Engine: `marketing` is accepted and reported in stats but currently scores like `general`; title-case headers still flag. |
+| `blog` | `general` | Skill: default long-form strictness. Engine: baseline scoring. |
+| `technical-blog` | `technical` | Skill: partial word-table exceptions and relaxed technical hedging. Engine: suppresses title-case header flags and other tells that are normal in code-adjacent prose. |
+| `investor-email` | `general` | Skill: extra-strict promo, significance, and conclusion rules. Engine: no email-specific mode; investor-only strictness stays on the skill side. |
+| `docs` | `technical` | Skill: clarity-first; lists and deliberate fragments OK. Engine: `technical` matches README/API heading and reference-register carve-outs. |
+| `casual` | `personal` | Skill: P0-only / skip most categories. Engine: `personal` scores like `general`; most casual tolerance stays skill-side. |
+
+CLI profile aliases (`linkedin`, `docs`, etc.) are a possible follow-on; until then, pass the detector mode from this table (for example `avoid-ai-writing-gate --context marketing` for a LinkedIn draft).
+
 ### Tolerance matrix
 
 Rules not listed in the table apply at full strength across all profiles.

@@ -120,6 +120,10 @@ reported in `stats.contextMode`, but currently score the same as `general`.
 Invalid modes fall back to `general` and set `stats.contextModeFallback` to the
 value you passed.
 
+The skill's six `--context` profiles (`linkedin`, `blog`, `technical-blog`,
+`investor-email`, `docs`, `casual`) use different names. See **Skill profiles and
+detector `contextMode`** in [`../references/patterns.md`](../references/patterns.md#skill-profiles-and-detector-contextmode) for the profile → mode map and what still differs between skill tolerance and engine scoring.
+
 `options.sourceMode` accepts `plain` (default) or `rendered-markdown`. Rendered
 Markdown mode masks initial YAML frontmatter and HTML comments before pattern
 matching and document metrics run. Frontmatter may use LF, CRLF, or CR line

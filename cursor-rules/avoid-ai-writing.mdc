@@ -35,7 +35,7 @@ This skill operates in one of three modes:
 
 Trigger detect mode when the user says "detect," "flag only," "audit only," "just flag," "scan," "what AI patterns are in this," or similar. Trigger edit mode when the user names a file and asks you to fix or clean it in place. Default to rewrite mode if not specified.
 
-**Invocation.** Natural language is enough ("rewrite this in a blunt voice for LinkedIn," "edit `post.md` in place," "scan this, don't rewrite"). Power users can also pass explicit options, which map to the sections below: `[--mode rewrite|detect|edit]`, `[--voice casual|professional|technical|warm|blunt]`, `[--context linkedin|blog|technical-blog|investor-email|docs|casual]`, `[--file PATH]`, `[--iterate N]` (max 2), `[--style CONFIG|GUIDE]`.
+**Invocation.** Natural language is enough ("rewrite this in a blunt voice for LinkedIn," "edit `post.md` in place," "scan this, don't rewrite"). Power users can also pass explicit options, which map to the sections below: `[--mode rewrite|detect|edit]`, `[--voice casual|professional|technical|warm|blunt]`, `[--context linkedin|blog|technical-blog|investor-email|docs|casual]` (when calling the deterministic detector or gate, map each profile to `contextMode` per **Skill profiles and detector contextMode** in Context profiles below), `[--file PATH]`, `[--iterate N]` (max 2), `[--style CONFIG|GUIDE]`.
 
 **Iterate to convergence (optional).** Rewrite mode already runs one corrective second pass (see Output format) — that built-in pass *is* pass 2, so `--iterate` does not stack on top of it. When the writer asks to "iterate," "keep going until it's clean," or passes `--iterate N`, repeat the audit→rewrite cycle until no patterns remain or **N passes** are reached. Cap **N at 2**: a rewrite plus one corrective pass clears the flagged patterns, and a third pass costs a full regeneration while rarely finding more. Report how many passes it took ("converged in 2 passes").
 
@@ -723,6 +723,21 @@ Pass an optional context hint to adjust rule strictness. If no context is specif
 **`investor-email`** — High-trust audience. Tighten everything; promotional language is the biggest risk.
 **`docs`** — Documentation, READMEs, guides. Clarity over voice.
 **`casual`** — Slack messages, internal notes, quick replies. Only catch the worst offenders.
+
+### Skill profiles and detector `contextMode`
+
+The skill's `--context` values above tune strictness through the tolerance matrix (LLM rewrite/detect). The deterministic detector (CLI, CI gate, and `analyzeText()` API) uses a separate `options.contextMode` enum: `general`, `technical`, `marketing`, and `personal`. When you score text outside the skill, pass the **Detector mode** below so engine behavior matches the profile as closely as it can today. Per-rule relaxations and skips in the matrix are **not** replayed in the detector except where a mode changes flagging (today, mainly `technical`).
+
+| Skill profile (`--context`) | Detector `contextMode` | What differs |
+|-----------------------------|------------------------|--------------|
+| `linkedin` | `marketing` | Skill: short-form social tolerances (fragments, bold hooks, hashtag rules). Engine: `marketing` is accepted and reported in stats but currently scores like `general`; title-case headers still flag. |
+| `blog` | `general` | Skill: default long-form strictness. Engine: baseline scoring. |
+| `technical-blog` | `technical` | Skill: partial word-table exceptions and relaxed technical hedging. Engine: suppresses title-case header flags and other tells that are normal in code-adjacent prose. |
+| `investor-email` | `general` | Skill: extra-strict promo, significance, and conclusion rules. Engine: no email-specific mode; investor-only strictness stays on the skill side. |
+| `docs` | `technical` | Skill: clarity-first; lists and deliberate fragments OK. Engine: `technical` matches README/API heading and reference-register carve-outs. |
+| `casual` | `personal` | Skill: P0-only / skip most categories. Engine: `personal` scores like `general`; most casual tolerance stays skill-side. |
+
+CLI profile aliases (`linkedin`, `docs`, etc.) are a possible follow-on; until then, pass the detector mode from this table (for example `avoid-ai-writing-gate --context marketing` for a LinkedIn draft).
 
 ### Tolerance matrix
 

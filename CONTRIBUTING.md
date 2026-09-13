@@ -6,12 +6,19 @@ keep the project coherent.
 
 ## Choosing an issue
 
+Check the assignee, comments, and linked PRs to see whether someone is already
+working on an issue. For an unclaimed issue, leave a short comment letting us
+know you're starting. We appreciate the heads-up, and you can begin right away:
+you do not need to wait for assignment or maintainer confirmation. If someone
+is already working on it, coordinate with them before duplicating their work.
+If the issue explicitly needs a design decision before implementation, resolve
+that question first.
+
 Issues labeled `good first issue` are reserved for people making their first
-contribution to this repository. Check the assignee and comments, then comment
-on one unclaimed issue before starting. Take only one `good first issue` for
-your first PR; leave the others for fellow newcomers, including while your PR
-is awaiting review.
-- You are also welcome to propose your own issues & ideas
+contribution to this repository. Take only one for your first PR; leave the
+others for fellow newcomers, including while your PR is awaiting review.
+
+You are also welcome to propose your own issues and ideas.
 
 If you've already contributed here, choose a `help wanted` issue without the
 `good first issue` label, propose another improvement, or help review and test
@@ -89,6 +96,15 @@ The rules from the [#88 license audit](https://github.com/conorbronsdon/avoid-ai
 
 ```bash
 npm test
+```
+
+`npm test` runs every suite via `scripts/run-tests.js` and prints a combined
+summary; earlier failures do not skip later files. To run one suite:
+
+```bash
+node scripts/run-tests.js detector/patterns.test.js
+# or invoke the file directly:
+node detector/patterns.test.js
 ```
 
 This runs the engine fixtures and the `CATEGORIES.md` contract checks: every
